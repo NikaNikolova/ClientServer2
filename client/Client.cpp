@@ -1,110 +1,102 @@
-#define WIN32_LEAN_AND_MEAN
-
 #include <iostream>
-#include <windows.h>
-#include <ws2tcpip.h>
 #include <string>
-using namespace std;
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
-#pragma comment (lib, "Ws2_32.lib")
-#pragma comment (lib, "Mswsock.lib")
-#pragma comment (lib, "AdvApi32.lib")
+#pragma comment(lib, "Ws2_32.lib")
 
-#define DEFAULT_BUFLEN 512
-#define DEFAULT_PORT "27015"
+constexpr int BUFFER_SIZE = 512;
+constexpr char DEFAULT_PORT[] = "27015";
+constexpr char SERVER_IP[] = "127.0.0.1";
 
-int main(int argc, char** argv)
-{
-    setlocale(0, "");
-    system("title CLIENT SIDE");
-
-    WSADATA wsaData;
-    int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (iResult != 0) {
-        cout << "WSAStartup failed with error: " << iResult << "\n";
-        return 11;
+class NetworkClient {
+public:
+    NetworkClient() {
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            throw std::runtime_error("Winsock initialization failed.");
+        }
     }
 
-    addrinfo hints;
-    ZeroMemory(&hints, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    const char* ip = "localhost";
-
-    addrinfo* result = NULL;
-    iResult = getaddrinfo(ip, DEFAULT_PORT, &hints, &result);
-
-    if (iResult != 0) {
-        cout << "getaddrinfo failed with error: " << iResult << "\n";
+    ~NetworkClient() {
         WSACleanup();
-        return 12;
     }
 
-    SOCKET ConnectSocket = INVALID_SOCKET;
-
-    for (addrinfo* ptr = result; ptr != NULL; ptr = ptr->ai_next) {
-        ConnectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
-
-        if (ConnectSocket == INVALID_SOCKET) {
-            cout << "socket failed with error: " << WSAGetLastError() << "\n";
-            WSACleanup();
-            return 13;
-        }
-
-        iResult = connect(ConnectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
-        if (iResult == SOCKET_ERROR) {
-            closesocket(ConnectSocket);
-            ConnectSocket = INVALID_SOCKET;
-            continue;
-        }
-        break;
-    }
-
-    freeaddrinfo(result);
-
-    if (ConnectSocket == INVALID_SOCKET) {
-        cout << "невозможно подключиться к серверу. убедитесь, что процесс сервера запущен!\n";
-        WSACleanup();
-        return 14;
-    }
-
-    //////////////////////////////////////////////////////////
-
-    while (true)
-    {
-        string message;
-        cout << "Пожалуйста, введите число: ";
-        getline(cin, message);
-
-        iResult = send(ConnectSocket, message.c_str(), (int)message.size(), 0);
-        if (iResult == SOCKET_ERROR) {
-            cout << "отправить не удалось с ошибкой: " << WSAGetLastError() << "\n";
-            closesocket(ConnectSocket);
-            WSACleanup();
-            return 15;
-        }
-
-        char response[DEFAULT_BUFLEN];
-
-        iResult = recv(ConnectSocket, response, DEFAULT_BUFLEN, 0);
-        response[iResult] = '\0';
-
-        if (iResult > 0) {
-            double serverResponse = atof(response);
-            cout << "Сервер ответил: " << serverResponse << "\n";
-        }
-        else if (iResult == 0) {
-            cout << "Соединение с сервером закрыто.\n";
-            break; // Завершення циклу, оскільки з'єднання закрито
-        }
-        else {
-            cout << "получение не удалось с ошибкой: " << WSAGetLastError() << "\n";
-            break; // Завершення циклу при помилці отримання даних
+    void run() {
+        try {
+            auto socket = connectToServer();
+            interactWithServer(socket);
+            closesocket(socket);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << std::endl;
+            exit(1);
         }
     }
 
-    closesocket(ConnectSocket);
-    WSACleanup();
+private:
+    SOCKET connectToServer() {
+        struct addrinfo hints{}, *result;
+        ZeroMemory(&hints, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+
+        if (getaddrinfo(SERVER_IP, DEFAULT_PORT, &hints, &result) != 0) {
+            throw std::runtime_error("Failed to get address info for the server.");
+        }
+
+        SOCKET connSocket = INVALID_SOCKET;
+        for (auto ptr = result; ptr != nullptr; ptr = ptr->ai_next) {
+            connSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
+            if (connSocket == INVALID_SOCKET) {
+                freeaddrinfo(result);
+                throw std::runtime_error("Unable to create socket.");
+            }
+
+            if (connect(connSocket, ptr->ai_addr, static_cast<int>(ptr->ai_addrlen)) == SOCKET_ERROR) {
+                closesocket(connSocket);
+                continue;
+            }
+            freeaddrinfo(result);
+            return connSocket;
+        }
+
+        freeaddrinfo(result);
+        throw std::runtime_error("Failed to connect to the server.");
+    }
+
+    void interactWithServer(SOCKET socket) {
+        std::string input;
+        char response[BUFFER_SIZE];
+        while (true) {
+            std::cout << "Enter message: ";
+            getline(std::cin, input);
+
+            if (send(socket, input.c_str(), static_cast<int>(input.length()), 0) == SOCKET_ERROR) {
+                throw std::runtime_error("Failed to send data to server.");
+            }
+
+            int bytesReceived = recv(socket, response, BUFFER_SIZE, 0);
+            if (bytesReceived > 0) {
+                response[bytesReceived] = '\0';
+                std::cout << "Server replied: " << response << std::endl;
+            } else if (bytesReceived == 0) {
+                std::cout << "Server closed the connection." << std::endl;
+                break;
+            } else {
+                throw std::runtime_error("Failed to receive data from server.");
+            }
+        }
+    }
+};
+
+int main() {
+    try {
+        NetworkClient client;
+        client.run();
+    } catch (const std::exception& ex) {
+        std::cerr << "An exception occurred: " << ex.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }
